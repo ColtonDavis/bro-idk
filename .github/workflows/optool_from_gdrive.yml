@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       ipa_gdrive:
-        description: 'Google Drive share URL to crssplay_frida_localpatched.ipa'
+        description: 'Google Drive share URL to crssplay_frida_localpatched.ipa (paste your /view link)'
         required: true
       dylib_gdrive:
-        description: 'Google Drive share URL to frida-gadget-17.3.2-ios-universal.dylib'
+        description: 'Google Drive share URL to frida-gadget-17.3.2-ios-universal.dylib (paste your /view link)'
         required: true
 
 jobs:
@@ -20,13 +20,12 @@ jobs:
 
       - name: Ensure Python and pip
         run: |
-          # macOS runner normally has python3; ensure pip exists
-          python3 --version || /usr/bin/python3 --version
-          python3 -m pip install --upgrade pip setuptools wheel
+          python3 --version
+          python3 -m pip install --upgrade pip setuptools wheel --break-system-packages
 
-      - name: Install gdown (use pip, then call via python -m gdown)
+      - name: Install gdown
         run: |
-          python3 -m pip install --upgrade gdown
+          python3 -m pip install --upgrade gdown --break-system-packages
 
       - name: Prepare workdir
         run: |
@@ -45,10 +44,9 @@ jobs:
           python3 -m gdown "${{ github.event.inputs.dylib_gdrive }}" -O frida-gadget-17.3.2-ios-universal.dylib
           ls -lh
 
-      - name: Try download prebuilt optool or build if necessary
+      - name: Get or build optool
         run: |
           set -e
-          cd $GITHUB_WORKSPACE
           OPT_ZIP="https://github.com/alexzielenski/optool/releases/download/0.1/optool.zip"
           echo "Trying to download prebuilt optool..."
           if curl -sSL "$OPT_ZIP" -o optool.zip; then
@@ -109,7 +107,7 @@ jobs:
           cd workdir/work_unzip
           zip -r -y ../crssplay_frida_optooled.ipa Payload
           cd ..
-          ls -lh crssplay_frida_optooled.ipa
+          ls -lh workdir/crssplay_frida_optooled.ipa
 
       - name: Upload patched IPA artifact
         uses: actions/upload-artifact@v4
