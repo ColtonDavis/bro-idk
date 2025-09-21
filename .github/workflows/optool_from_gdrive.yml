@@ -1,0 +1,118 @@
+name: optool-inject-from-gdrive
+
+on:
+  workflow_dispatch:
+    inputs:
+      ipa_gdrive:
+        description: 'Google Drive share URL to crssplay_frida_localpatched.ipa'
+        required: true
+      dylib_gdrive:
+        description: 'Google Drive share URL to frida-gadget-17.3.2-ios-universal.dylib'
+        required: true
+
+jobs:
+  optoolize:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure Python and pip
+        run: |
+          # macOS runner normally has python3; ensure pip exists
+          python3 --version || /usr/bin/python3 --version
+          python3 -m pip install --upgrade pip setuptools wheel
+
+      - name: Install gdown (use pip, then call via python -m gdown)
+        run: |
+          python3 -m pip install --upgrade gdown
+
+      - name: Prepare workdir
+        run: |
+          mkdir -p workdir
+          cd workdir
+          pwd
+          ls -la
+
+      - name: Download IPA and dylib via gdown (handles Google Drive share links)
+        run: |
+          set -e
+          cd workdir
+          echo "Downloading IPA from: ${{ github.event.inputs.ipa_gdrive }}"
+          python3 -m gdown "${{ github.event.inputs.ipa_gdrive }}" -O crssplay_frida_localpatched.ipa
+          echo "Downloading dylib from: ${{ github.event.inputs.dylib_gdrive }}"
+          python3 -m gdown "${{ github.event.inputs.dylib_gdrive }}" -O frida-gadget-17.3.2-ios-universal.dylib
+          ls -lh
+
+      - name: Try download prebuilt optool or build if necessary
+        run: |
+          set -e
+          cd $GITHUB_WORKSPACE
+          OPT_ZIP="https://github.com/alexzielenski/optool/releases/download/0.1/optool.zip"
+          echo "Trying to download prebuilt optool..."
+          if curl -sSL "$OPT_ZIP" -o optool.zip; then
+            unzip -o optool.zip -d optool_tmp || true
+            if [ -f optool_tmp/optool ]; then
+              chmod +x optool_tmp/optool
+              sudo mv optool_tmp/optool /usr/local/bin/optool || true
+            fi
+          fi
+          if ! command -v optool >/dev/null 2>&1; then
+            echo "Prebuilt optool not present — building from source..."
+            git clone https://github.com/alexzielenski/optool.git optool_src
+            cd optool_src || exit 1
+            make || true
+            if [ -f optool ]; then
+              sudo mv optool /usr/local/bin/optool
+            else
+              echo "optool build failed"
+              ls -la
+              exit 1
+            fi
+          fi
+          /usr/local/bin/optool --version || true
+
+      - name: Unzip IPA
+        run: |
+          cd workdir
+          unzip -o crssplay_frida_localpatched.ipa -d work_unzip
+          ls -la work_unzip/Payload || true
+
+      - name: Copy dylib into Frameworks
+        run: |
+          cd workdir/work_unzip/Payload
+          APP=$(ls -1 | grep '\.app' | head -n1)
+          echo "App folder: $APP"
+          mkdir -p "$APP/Frameworks"
+          cp ../frida-gadget-17.3.2-ios-universal.dylib "$APP/Frameworks/" || true
+          ls -la "$APP/Frameworks"
+
+      - name: Inject LC_LOAD_DYLIB into dfxm (optool)
+        run: |
+          set -e
+          cd workdir/work_unzip
+          APP=$(ls Payload | grep '\.app' | head -n1)
+          echo "App: $APP"
+          EXEC=Payload/"$APP"/dfxm
+          echo "Target executable: $EXEC"
+          if [ ! -f "$EXEC" ]; then
+            echo "ERROR: expected executable Payload/$APP/dfxm not found!"
+            ls -la Payload/"$APP"
+            exit 1
+          fi
+          sudo /usr/local/bin/optool install -c load -p @executable_path/Frameworks/frida-gadget-17.3.2-ios-universal.dylib -t "$EXEC"
+          echo "optool injection complete"
+
+      - name: Repack IPA
+        run: |
+          cd workdir/work_unzip
+          zip -r -y ../crssplay_frida_optooled.ipa Payload
+          cd ..
+          ls -lh crssplay_frida_optooled.ipa
+
+      - name: Upload patched IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: crssplay_frida_optooled
+          path: workdir/crssplay_frida_optooled.ipa
