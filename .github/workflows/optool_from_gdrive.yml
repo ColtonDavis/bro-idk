@@ -1,116 +1,73 @@
-name: optool-inject-from-gdrive
+name: optoolize
 
 on:
   workflow_dispatch:
     inputs:
       ipa_gdrive:
-        description: 'Google Drive share URL to crssplay_frida_localpatched.ipa (paste your /view link)'
+        description: "Google Drive direct link for IPA"
         required: true
+        default: "https://drive.google.com/uc?export=download&id=1Y0xHaxuKUUCoph7p_ZEG-jbXHZFHH49M"
       dylib_gdrive:
-        description: 'Google Drive share URL to frida-gadget-17.3.2-ios-universal.dylib (paste your /view link)'
+        description: "Google Drive direct link for Frida dylib"
         required: true
+        default: "https://drive.google.com/uc?export=download&id=1p8dw1tamEhESE8u6wOYn0VpCObgsJYZj"
 
 jobs:
-  optoolize:
+  build:
     runs-on: macos-latest
-    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Ensure Python and pip
+      - name: Ensure Python and gdown
         run: |
-          python3 --version
-          python3 -m pip install --upgrade pip setuptools wheel --break-system-packages
-
-      - name: Install gdown
-        run: |
-          python3 -m pip install --upgrade gdown --break-system-packages
+          python3 -m pip install --upgrade pip
+          pip install gdown
 
       - name: Prepare workdir
-        run: |
-          mkdir -p workdir
-          cd workdir
-          pwd
-          ls -la
+        run: mkdir workdir
 
-      - name: Download IPA and dylib via gdown (handles Google Drive share links)
+      - name: Download IPA and dylib via gdown
         run: |
-          set -e
           cd workdir
-          echo "Downloading IPA from: ${{ github.event.inputs.ipa_gdrive }}"
-          python3 -m gdown "${{ github.event.inputs.ipa_gdrive }}" -O crssplay_frida_localpatched.ipa
-          echo "Downloading dylib from: ${{ github.event.inputs.dylib_gdrive }}"
-          python3 -m gdown "${{ github.event.inputs.dylib_gdrive }}" -O frida-gadget-17.3.2-ios-universal.dylib
+          gdown "${{ github.event.inputs.ipa_gdrive }}" -O crssplay_frida_localpatched.ipa
+          gdown "${{ github.event.inputs.dylib_gdrive }}" -O frida-gadget-17.3.2-ios-universal.dylib
+          echo "Downloaded files:"
           ls -lh
+          echo "IPA first 256 bytes:"
+          hexdump -C -n 256 crssplay_frida_localpatched.ipa || true
+          echo "DYLIB first 256 bytes:"
+          hexdump -C -n 256 frida-gadget-17.3.2-ios-universal.dylib || true
 
-      - name: Get or build optool
+      - name: Get optool
         run: |
-          set -e
-          OPT_ZIP="https://github.com/alexzielenski/optool/releases/download/0.1/optool.zip"
-          echo "Trying to download prebuilt optool..."
-          if curl -sSL "$OPT_ZIP" -o optool.zip; then
-            unzip -o optool.zip -d optool_tmp || true
-            if [ -f optool_tmp/optool ]; then
-              chmod +x optool_tmp/optool
-              sudo mv optool_tmp/optool /usr/local/bin/optool || true
-            fi
-          fi
-          if ! command -v optool >/dev/null 2>&1; then
-            echo "Prebuilt optool not present — building from source..."
-            git clone https://github.com/alexzielenski/optool.git optool_src
-            cd optool_src || exit 1
-            make || true
-            if [ -f optool ]; then
-              sudo mv optool /usr/local/bin/optool
-            else
-              echo "optool build failed"
-              ls -la
-              exit 1
-            fi
-          fi
-          /usr/local/bin/optool --version || true
+          brew install optool || brew install --HEAD optool || true
 
       - name: Unzip IPA
         run: |
-          cd workdir
-          unzip -o crssplay_frida_localpatched.ipa -d work_unzip
-          ls -la work_unzip/Payload || true
+          mkdir work_unzip
+          unzip workdir/crssplay_frida_localpatched.ipa -d work_unzip
 
       - name: Copy dylib into Frameworks
         run: |
-          cd workdir/work_unzip/Payload
-          APP=$(ls -1 | grep '\.app' | head -n1)
-          echo "App folder: $APP"
-          mkdir -p "$APP/Frameworks"
-          cp ../frida-gadget-17.3.2-ios-universal.dylib "$APP/Frameworks/" || true
-          ls -la "$APP/Frameworks"
+          APP_PATH=$(find work_unzip/Payload -name "*.app" | head -n 1)
+          mkdir -p "$APP_PATH/Frameworks"
+          cp workdir/frida-gadget-17.3.2-ios-universal.dylib "$APP_PATH/Frameworks/"
+          echo "Copied dylib into $APP_PATH/Frameworks"
 
-      - name: Inject LC_LOAD_DYLIB into dfxm (optool)
+      - name: Inject LC_LOAD_DYLIB into dfxm
         run: |
-          set -e
-          cd workdir/work_unzip
-          APP=$(ls Payload | grep '\.app' | head -n1)
-          echo "App: $APP"
-          EXEC=Payload/"$APP"/dfxm
-          echo "Target executable: $EXEC"
-          if [ ! -f "$EXEC" ]; then
-            echo "ERROR: expected executable Payload/$APP/dfxm not found!"
-            ls -la Payload/"$APP"
-            exit 1
-          fi
-          sudo /usr/local/bin/optool install -c load -p @executable_path/Frameworks/frida-gadget-17.3.2-ios-universal.dylib -t "$EXEC"
-          echo "optool injection complete"
+          APP_PATH=$(find work_unzip/Payload -name "*.app" | head -n 1)
+          EXEC="$APP_PATH/dfxm"
+          optool install -c load -p "@executable_path/Frameworks/frida-gadget-17.3.2-ios-universal.dylib" -t "$EXEC" || true
 
       - name: Repack IPA
         run: |
-          cd workdir/work_unzip
-          zip -r -y ../crssplay_frida_optooled.ipa Payload
-          cd ..
-          ls -lh workdir/crssplay_frida_optooled.ipa
+          cd work_unzip
+          zip -r ../crssplay_frida_patched.ipa Payload
 
       - name: Upload patched IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: crssplay_frida_optooled
-          path: workdir/crssplay_frida_optooled.ipa
+          name: crssplay_frida_patched
+          path: workdir/../crssplay_frida_patched.ipa
